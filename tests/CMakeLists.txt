@@ -51,6 +51,7 @@ set(SPDLOG_UTESTS_SOURCES
     test_circular_q.cpp
     test_bin_to_hex.cpp
     test_ringbuffer.cpp
+    test_multiline_sink.cpp
     test_timezone.cpp
 )
 
