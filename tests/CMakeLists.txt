@@ -40,6 +40,7 @@ set(SPDLOG_UTESTS_SOURCES
     main.cpp
     test_mpmc_q.cpp
     test_dup_filter.cpp
+    test_multi_line_sink.cpp
     test_fmt_helper.cpp
     test_stdout_api.cpp
     test_backtrace.cpp

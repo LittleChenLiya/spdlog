@@ -12,6 +12,8 @@ endif()
 # Example of using pre-compiled library
 # ---------------------------------------------------------------------------------------
 add_executable(example example.cpp)
+add_executable(multi_line_sink_example multi_line_sink_example.cpp)
+target_link_libraries(multi_line_sink_example PRIVATE spdlog::spdlog)
 target_link_libraries(example PRIVATE spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
 # ---------------------------------------------------------------------------------------
@@ -20,4 +22,7 @@ target_link_libraries(example PRIVATE spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 if(SPDLOG_BUILD_EXAMPLE_HO)
     add_executable(example_header_only example.cpp)
     target_link_libraries(example_header_only PRIVATE spdlog::spdlog_header_only)
+    add_executable(multi_line_sink_example_ho multi_line_sink_example.cpp)
+    target_link_libraries(multi_line_sink_example_ho
+                          PRIVATE spdlog::spdlog_header_only)
 endif()

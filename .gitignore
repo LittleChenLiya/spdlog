@@ -53,6 +53,7 @@ example/*
 !example/CMakeLists.txt
 !example/meson.build
 !example/multisink.cpp
+!example/multi_line_sink_example.cpp
 !example/jni
 
 # generated files
