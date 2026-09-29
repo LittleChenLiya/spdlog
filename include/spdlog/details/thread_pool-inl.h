@@ -47,7 +47,7 @@ SPDLOG_INLINE thread_pool::thread_pool(size_t q_max_items, size_t threads_n)
 SPDLOG_INLINE thread_pool::~thread_pool() {
     SPDLOG_TRY {
         for (size_t i = 0; i < threads_.size(); i++) {
-            post_async_msg_(async_msg(async_msg_type::terminate), async_overflow_policy::block);
+            q_.enqueue(async_msg(async_msg_type::terminate));
         }
 
         for (auto &t : threads_) {
@@ -64,9 +64,20 @@ void SPDLOG_INLINE thread_pool::post_log(async_logger_ptr &&worker_ptr,
     post_async_msg_(std::move(async_m), overflow_policy);
 }
 
-void SPDLOG_INLINE thread_pool::post_flush(async_logger_ptr &&worker_ptr,
-                                           async_overflow_policy overflow_policy) {
-    post_async_msg_(async_msg(std::move(worker_ptr), async_msg_type::flush), overflow_policy);
+std::future<flush_result_t> SPDLOG_INLINE thread_pool::post_flush(
+    async_logger_ptr &&worker_ptr) {
+    // The barrier is enqueued with the blocking policy so it can never be
+    // dropped or overwritten. The logger's current flush epoch is sealed and
+    // linked to its previous epoch atomically (under the queue lock) at the
+    // exact position of the barrier in the queue.
+    async_msg async_m(std::move(worker_ptr), async_msg_type::flush_ack);
+    std::future<flush_result_t> result_future;
+    q_.enqueue_barrier(std::move(async_m), [&] {
+        auto state = async_m.worker_ptr->install_flush_barrier_();
+        async_m.flush_info.assign(state);
+        result_future = state->get_future();
+    });
+    return result_future;
 }
 
 size_t SPDLOG_INLINE thread_pool::overrun_counter() { return q_.overrun_counter(); }
@@ -81,13 +92,20 @@ size_t SPDLOG_INLINE thread_pool::queue_size() { return q_.size(); }
 
 void SPDLOG_INLINE thread_pool::post_async_msg_(async_msg &&new_msg,
                                                 async_overflow_policy overflow_policy) {
+    auto *worker = new_msg.worker_ptr.get();
+    auto stamp = [worker](async_msg &msg) { worker->stamp_flush_epoch_(msg); };
+    auto is_barrier = [](const async_msg &msg) {
+        return msg.msg_type != async_msg_type::log;
+    };
+    auto on_reject = [worker](async_msg &) { worker->record_rejected_(); };
+
     if (overflow_policy == async_overflow_policy::block) {
-        q_.enqueue(std::move(new_msg));
+        q_.enqueue_log_blocking(std::move(new_msg), stamp);
     } else if (overflow_policy == async_overflow_policy::overrun_oldest) {
-        q_.enqueue_nowait(std::move(new_msg));
+        q_.enqueue_log_nowait(std::move(new_msg), stamp, is_barrier, on_reject);
     } else {
         assert(overflow_policy == async_overflow_policy::discard_new);
-        q_.enqueue_if_have_room(std::move(new_msg));
+        q_.enqueue_log_if_have_room(std::move(new_msg), stamp, on_reject);
     }
 }
 
@@ -105,10 +123,16 @@ bool SPDLOG_INLINE thread_pool::process_next_msg_() {
     switch (incoming_async_msg.msg_type) {
         case async_msg_type::log: {
             incoming_async_msg.worker_ptr->backend_sink_it_(incoming_async_msg);
+            incoming_async_msg.flush_info.settle_delivered();
             return true;
         }
-        case async_msg_type::flush: {
+        case async_msg_type::flush_ack: {
+            auto state = incoming_async_msg.flush_info.get();
+            incoming_async_msg.flush_info.detach();
             incoming_async_msg.worker_ptr->backend_flush_();
+            // Park until every earlier message settled; then fulfill the
+            // future with the flush result.
+            state->barrier_reached();
             return true;
         }
 

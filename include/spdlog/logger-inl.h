@@ -97,6 +97,14 @@ SPDLOG_INLINE void logger::dump_backtrace() { dump_backtrace_(); }
 // flush functions
 SPDLOG_INLINE void logger::flush() { flush_(); }
 
+SPDLOG_INLINE std::future<flush_result_t> logger::flush_async() {
+    flush_();
+    std::promise<flush_result_t> promise;
+    auto future = promise.get_future();
+    promise.set_value(flush_result_t{});
+    return future;
+}
+
 SPDLOG_INLINE void logger::flush_on(level::level_enum log_level) { flush_level_.store(log_level); }
 
 SPDLOG_INLINE level::level_enum logger::flush_level() const {

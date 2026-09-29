@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <future>
 #include <initializer_list>
 #include <memory>
 #include <string>
@@ -325,6 +326,14 @@ struct source_loc {
     const char *filename{nullptr};
     int line{0};
     const char *funcname{nullptr};
+};
+
+// Result of an asynchronous flush operation.
+// Returned (inside a std::future) by async_logger::flush_async().
+struct flush_result_t {
+    // Number of messages that were lost due to an overflow policy
+    // (overrun_oldest / discard_new) before the flush barrier completed.
+    size_t lost_messages{0};
 };
 
 struct file_event_handlers {

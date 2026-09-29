@@ -298,6 +298,12 @@ public:
 
     // flush functions
     void flush();
+
+    // Flush asynchronously and return a handle to the flush result.
+    // Synchronous loggers complete immediately with an empty result; the
+    // async_logger override waits for its queued messages and sink flush.
+    virtual std::future<flush_result_t> flush_async();
+
     void flush_on(level::level_enum log_level);
     level::level_enum flush_level() const;
 

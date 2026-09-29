@@ -5,10 +5,15 @@
 
 // multi producer-multi consumer blocking queue.
 // enqueue(..) - will block until room found to put the new message.
-// enqueue_nowait(..) - enqueue immediately. overruns oldest message if no 
+// enqueue_nowait(..) - enqueue immediately. overruns oldest message if no
 // room left.
 // dequeue_for(..) - will block until the queue is not empty or timeout have
 // passed.
+//
+// The *_log / *_barrier variants invoke callbacks under the queue lock so
+// the flush epoch of a message can be stamped in exact enqueue order. They
+// also guarantee that a barrier item is never overwritten: if the oldest
+// item is a barrier an incoming overrun message is rejected instead.
 
 #include <spdlog/details/circular_q.h>
 
@@ -62,7 +67,6 @@ public:
             ++discard_counter_;
         }
     }
-
     // dequeue with a timeout.
     // Return true, if succeeded dequeue item, false otherwise
     bool dequeue_for(T &popped_item, std::chrono::milliseconds wait_duration) {
@@ -146,6 +150,78 @@ public:
     }
 
 #endif
+
+    // blocking enqueue for a log message. before_push runs under the queue
+    // lock right before the message is stored, stamping its flush epoch in the
+    // exact enqueue order.
+    template <typename BeforePush>
+    void enqueue_log_blocking(T &&item, BeforePush before_push) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        pop_cv_.wait(lock, [this] { return !this->q_.full(); });
+        before_push(item);
+        q_.push_back(std::move(item));
+        push_cv_.notify_one();
+    }
+
+    // blocking enqueue for a flush barrier. before_push seals the logger's
+    // flush epoch and links the barrier to it, atomically with the enqueue.
+    template <typename BeforePush>
+    void enqueue_barrier(T &&item, BeforePush before_push) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        pop_cv_.wait(lock, [this] { return !this->q_.full(); });
+        before_push();
+        q_.push_back(std::move(item));
+        push_cv_.notify_one();
+    }
+
+    // overrun_oldest enqueue for a log message. The message is stamped only if
+    // it will actually be stored. If the queue is full and the oldest item is
+    // a barrier, the incoming message is rejected (never overwriting the
+    // barrier). Note: the overwritten message settles its own bookkeeping via
+    // its RAII flush-info destructor when its slot is replaced.
+    template <typename BeforePush, typename IsBarrier, typename OnReject>
+    void enqueue_log_nowait(T &&item,
+                            BeforePush before_push,
+                            IsBarrier is_barrier,
+                            OnReject on_reject) {
+        bool rejected = false;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (q_.full() && is_barrier(q_.front())) {
+            on_reject(item);
+            rejected = true;
+        } else {
+            before_push(item);
+            q_.push_back(std::move(item));
+        }
+        if (rejected) {
+            ++discard_counter_;
+        } else {
+            push_cv_.notify_one();
+        }
+    }
+
+    // discard_new enqueue for a log message. The message is stamped only if it
+    // will actually be stored; a rejected message is left untouched.
+    template <typename BeforePush, typename OnReject>
+    void enqueue_log_if_have_room(T &&item,
+                                  BeforePush before_push,
+                                  OnReject on_reject) {
+        bool pushed = false;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (!q_.full()) {
+            before_push(item);
+            q_.push_back(std::move(item));
+            pushed = true;
+        } else {
+            on_reject(item);
+        }
+
+        if (pushed) {
+            push_cv_.notify_one();
+        } else {
+            ++discard_counter_;
+        }
+    }
 
     size_t overrun_counter() {
         std::lock_guard<std::mutex> lock(queue_mutex_);

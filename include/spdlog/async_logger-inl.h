@@ -47,13 +47,52 @@ SPDLOG_LOGGER_CATCH(msg.source)
 // send flush request to the thread pool
 SPDLOG_INLINE void async_logger::flush_(){
     SPDLOG_TRY{if (auto pool_ptr = thread_pool_.lock()){
-        pool_ptr -> post_flush(shared_from_this(), overflow_policy_);
+        pool_ptr->post_flush(shared_from_this());
 }
 else {
     throw_spdlog_ex("async flush: thread pool doesn't exist anymore");
 }
 }
 SPDLOG_LOGGER_CATCH(source_loc())
+}
+
+// send an awaitable flush barrier to the thread pool
+SPDLOG_INLINE std::future<flush_result_t> async_logger::flush_async() {
+    if (auto pool_ptr = thread_pool_.lock()) {
+        return pool_ptr->post_flush(shared_from_this());
+    }
+    throw_spdlog_ex("async flush: thread pool doesn't exist anymore");
+}
+
+// Stamp a log message with the logger's current flush epoch (under queue
+// lock, so this matches the exact position of the message in the queue).
+SPDLOG_INLINE void async_logger::stamp_flush_epoch_(details::async_msg &msg) {
+    if (!flush_epoch_) {
+        flush_epoch_ = details::flush_state::create(nullptr);
+    }
+    msg.flush_info.assign(flush_epoch_);
+    flush_epoch_->add_inflight();
+}
+
+SPDLOG_INLINE void async_logger::record_rejected_() {
+    if (!flush_epoch_) {
+        flush_epoch_ = details::flush_state::create(nullptr);
+    }
+    // Count the loss against the current epoch without an in-flight entry:
+    // this message was never queued and so there is nothing to wait for.
+    flush_epoch_->record_loss();
+}
+
+// Turn the current epoch into the pending flush barrier and open a new epoch.
+// Called while the queue lock is held, right as the barrier is stored.
+SPDLOG_INLINE std::shared_ptr<details::flush_state>
+async_logger::install_flush_barrier_() {
+    if (!flush_epoch_) {
+        flush_epoch_ = details::flush_state::create(nullptr);
+    }
+    auto barrier = flush_epoch_;
+    flush_epoch_ = details::flush_state::create(barrier);
+    return barrier;
 }
 
 //
@@ -82,6 +121,7 @@ SPDLOG_INLINE void async_logger::backend_flush_() {
 SPDLOG_INLINE std::shared_ptr<logger> async_logger::clone(std::string new_name) {
     auto cloned = std::make_shared<async_logger>(*this);
     cloned->name_ = std::move(new_name);
+    cloned->flush_epoch_.reset();
     return cloned;
 }
 

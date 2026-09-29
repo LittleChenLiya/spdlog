@@ -47,6 +47,13 @@ SPDLOG_INLINE log_msg_buffer &log_msg_buffer::operator=(log_msg_buffer &&other) 
     log_msg::operator=(other);
     buffer = std::move(other.buffer);
     update_string_views();
+    // Leave other in a valid empty state: it is a moved-from object that may
+    // be destroyed or reused (e.g. an overwritten circular-queue slot), and it
+    // must not retain string views into the buffer that was just moved out.
+    other.buffer.clear();
+    other.logger_name = string_view_t{};
+    other.payload = string_view_t{};
+    other.source = source_loc{};
     return *this;
 }
 

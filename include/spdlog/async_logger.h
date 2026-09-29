@@ -15,6 +15,9 @@
 // destructing..
 
 #include <spdlog/logger.h>
+#include <spdlog/details/flush_state.h>
+
+#include <future>
 
 SPDLOG_NAMESPACE_BEGIN
 
@@ -28,6 +31,7 @@ enum class async_overflow_policy {
 
 namespace details {
 class thread_pool;
+struct async_msg;
 }
 
 class SPDLOG_API async_logger final : public std::enable_shared_from_this<async_logger>,
@@ -57,6 +61,11 @@ public:
 
     std::shared_ptr<logger> clone(std::string new_name) override;
 
+    // Asynchronously flush this logger and return a handle that completes
+    // only once every message received by the logger before this call has
+    // been processed (or recorded as lost) and the sinks finished flushing.
+    std::future<flush_result_t> flush_async() override;
+
 protected:
     void sink_it_(const details::log_msg &msg) override;
     void flush_() override;
@@ -64,8 +73,21 @@ protected:
     void backend_flush_();
 
 private:
+    // Stamp a log message with the logger's current flush epoch. Called by
+    // the thread pool under the queue lock at enqueue time.
+    void stamp_flush_epoch_(details::async_msg &msg);
+
+    // Record a message that was never queued because the overflow policy had
+    // to drop it. Called under the queue lock.
+    void record_rejected_();
+
+    // Seal the current flush epoch (turning it into the pending barrier) and
+    // start a new open epoch for subsequent messages. Called by the thread
+    // pool under the queue lock when enqueuing a flush barrier.
+    std::shared_ptr<details::flush_state> install_flush_barrier_();
     std::weak_ptr<details::thread_pool> thread_pool_;
     async_overflow_policy overflow_policy_;
+    std::shared_ptr<details::flush_state> flush_epoch_;
 };
 SPDLOG_NAMESPACE_END
 

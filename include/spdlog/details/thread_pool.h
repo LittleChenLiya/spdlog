@@ -4,6 +4,7 @@
 #pragma once
 
 #include <spdlog/details/log_msg_buffer.h>
+#include <spdlog/details/flush_state.h>
 #include <spdlog/details/mpmc_blocking_q.h>
 #include <spdlog/details/os.h>
 
@@ -20,13 +21,73 @@ namespace details {
 
 using async_logger_ptr = std::shared_ptr<async_logger>;
 
-enum class async_msg_type { log, flush, terminate };
+enum class async_msg_type { log, flush_ack, terminate };
+
+// RAII holder for the flush epoch a message belongs to. Releasing the holder
+// (message delivered, evicted by overrun_oldest, or rejected by discard_new)
+// settles the in-flight bookkeeping exactly once.
+class async_flush_info {
+public:
+    async_flush_info() = default;
+    explicit async_flush_info(std::shared_ptr<flush_state> state)
+        : state_(std::move(state)) {}
+
+    async_flush_info(const async_flush_info &) = delete;
+    async_flush_info &operator=(const async_flush_info &) = delete;
+
+    async_flush_info(async_flush_info &&other) SPDLOG_NOEXCEPT
+        : state_(std::move(other.state_)) {
+        other.state_.reset();
+    }
+
+    async_flush_info &operator=(async_flush_info &&other) SPDLOG_NOEXCEPT {
+        if (this != &other) {
+            release_();
+            state_ = std::move(other.state_);
+            other.state_.reset();
+        }
+        return *this;
+    }
+
+    ~async_flush_info() { release_(); }
+
+    void assign(std::shared_ptr<flush_state> state) {
+        release_();
+        state_ = std::move(state);
+    }
+
+    const std::shared_ptr<flush_state> &get() const { return state_; }
+    explicit operator bool() const { return static_cast<bool>(state_); }
+
+    // The message reached the sinks: settle as delivered (not lost) and detach.
+    void settle_delivered() {
+        if (state_) {
+            state_->log_delivered();
+            state_.reset();
+        }
+    }
+
+    // Detach without loss accounting (used by the flush barrier itself).
+    void detach() { state_.reset(); }
+
+private:
+    // Any other release (overwrite or rejection) is a lost message.
+    void release_() {
+        if (state_) {
+            state_->log_lost();
+            state_.reset();
+        }
+    }
+
+    std::shared_ptr<flush_state> state_;
+};
 
 // Async msg to move to/from the queue
 // Movable only. should never be copied
 struct async_msg : log_msg_buffer {
     async_msg_type msg_type{async_msg_type::log};
     async_logger_ptr worker_ptr;
+    async_flush_info flush_info;
 
     async_msg() = default;
     ~async_msg() = default;
@@ -39,12 +100,14 @@ struct async_msg : log_msg_buffer {
     async_msg(async_msg &&other)
         : log_msg_buffer(std::move(other)),
           msg_type(other.msg_type),
-          worker_ptr(std::move(other.worker_ptr)) {}
+          worker_ptr(std::move(other.worker_ptr)),
+          flush_info(std::move(other.flush_info)) {}
 
     async_msg &operator=(async_msg &&other) {
         *static_cast<log_msg_buffer *>(this) = std::move(other);
         msg_type = other.msg_type;
         worker_ptr = std::move(other.worker_ptr);
+        flush_info = std::move(other.flush_info);
         return *this;
     }
 #else  // (_MSC_VER) && _MSC_VER <= 1800
@@ -88,7 +151,7 @@ public:
     void post_log(async_logger_ptr &&worker_ptr,
                   const details::log_msg &msg,
                   async_overflow_policy overflow_policy);
-    void post_flush(async_logger_ptr &&worker_ptr, async_overflow_policy overflow_policy);
+    std::future<flush_result_t> post_flush(async_logger_ptr &&worker_ptr);
     size_t overrun_counter();
     void reset_overrun_counter();
     size_t discard_counter();
